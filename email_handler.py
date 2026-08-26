@@ -9,6 +9,7 @@ import email
 import logging
 from email.message import EmailMessage
 from config import GMAIL_ADDRESS
+from token_manager import extract_token
 
 log = logging.getLogger(__name__)
 
@@ -111,4 +112,33 @@ def parse_email_bytes(raw_email: bytes) -> dict:
         "msg": msg,
         "from": msg.get("From", ""),
         "subject": msg.get("Subject", ""),
+    }
+
+
+def match_reply(raw_email: bytes, pending_tokens: list) -> dict:
+    """
+    Parse a raw email and check whether it replies to a pending token.
+
+    Shared by every email backend (imap_client.py, gmail_client.py) so
+    the token/pending-list matching logic isn't duplicated per backend.
+
+    Args:
+        raw_email (bytes): Raw email data.
+        pending_tokens (list): Tokens currently awaiting a reply.
+
+    Returns:
+        dict: {"token", "subject", "from", "body"} if this email matches
+            a pending token, otherwise None.
+    """
+    email_info = parse_email_bytes(raw_email)
+    token = extract_token(email_info["subject"])
+
+    if not token or token not in pending_tokens:
+        return None
+
+    return {
+        "token": token,
+        "subject": email_info["subject"],
+        "from": email_info["from"],
+        "body": get_email_body(email_info["msg"]),
     }

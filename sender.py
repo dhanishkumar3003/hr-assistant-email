@@ -10,7 +10,7 @@ from config import require_config
 from state_manager import save_sent_email
 from token_manager import generate_token
 from email_handler import build_invite_message
-from gmail_client import send_message
+from email_backend import get_email_backend
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ def send_invite(to_addr: str, candidate_name: str = "") -> str:
     Send an invitation email to a candidate and save state.
     
     Generates a unique tracking token, embeds it in the email subject,
-    sends via Gmail SMTP, and records the candidate in state.
+    sends via the configured backend, and records the candidate in state.
     
     Args:
         to_addr (str): Candidate email address.
@@ -37,9 +37,9 @@ def send_invite(to_addr: str, candidate_name: str = "") -> str:
     
     # Build email message
     message = build_invite_message(to_addr, candidate_name, subject)
-    
-    # Send via SMTP
-    if not send_message(message):
+
+    # Send via the configured backend (imap or gmail_api)
+    if not get_email_backend().send(message):
         return None
     
     log.info(

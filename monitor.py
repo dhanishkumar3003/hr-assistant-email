@@ -1,11 +1,11 @@
 """
 Reply monitoring loop.
 
-Continuously polls Gmail inbox for replies to sent invitations,
-matches them to candidates via token, extracts body, and classifies.
+Continuously polls the inbox for replies to sent invitations, matches
+them to candidates via token, and classifies them. Backend-agnostic -
+see email_backend.py for the IMAP vs Gmail API switch.
 """
 
-import base64
 import time
 import logging
 from datetime import datetime, timezone
@@ -21,73 +21,54 @@ from state_manager import (
     get_reply_body,
     set_classification,
 )
-from gmail_client import list_unread_messages, mark_as_read
-from token_manager import extract_token
-from email_handler import get_email_body, parse_email_bytes
+from email_backend import get_email_backend
 from reply_classifier import classify_reply
 
 log = logging.getLogger(__name__)
 
 
-def check_for_replies(pending_tokens: list) -> list:
+def check_for_replies(backend, pending_tokens: list) -> list:
     """
-    Check Gmail inbox for new replies and match them to candidates.
-
-    Searches for unseen emails, extracts tracking tokens, verifies
-    sender matches expected candidate, and records the reply in the DB.
+    Check the inbox for new replies and match them to candidates.
 
     Args:
+        backend: Active email backend (see email_backend.py).
         pending_tokens (list): Tokens currently awaiting a reply.
 
     Returns:
         list: List of tokens that matched new replies.
     """
-    messages = list_unread_messages()
-    if not messages:
-        return []
-
     matched_tokens = []
 
-    for message in messages:
-        raw_email = base64.urlsafe_b64decode(message["raw"])
-        email_info = parse_email_bytes(raw_email)
-
-        # Extract token from subject
-        token = extract_token(email_info["subject"])
-
-        if not token or token not in pending_tokens:
-            continue
+    for reply in backend.fetch_unseen(pending_tokens):
+        token = reply["token"]
 
         # Verify sender
         expected_email = get_candidate_email(token)
-        if expected_email.lower() not in email_info["from"].lower():
+        if expected_email.lower() not in reply["from"].lower():
             log.warning(
                 f"Token {token} matched but "
                 f"sender mismatch: "
                 f"expected {expected_email}, "
-                f"got {email_info['from']}. "
+                f"got {reply['from']}. "
                 f"Recording anyway."
             )
-
-        # Extract body
-        body = get_email_body(email_info["msg"])
 
         log.info(
             f"Reply detected | "
             f"token={token} | "
-            f"from={email_info['from']} | "
-            f"subject='{email_info['subject']}'"
+            f"from={reply['from']} | "
+            f"subject='{reply['subject']}'"
         )
 
         record_reply(
             token,
-            email_info["subject"],
-            body,
+            reply["subject"],
+            reply["body"],
             datetime.now(timezone.utc),
         )
 
         matched_tokens.append(token)
-        mark_as_read(message["id"])
 
     return matched_tokens
 
@@ -95,7 +76,7 @@ def check_for_replies(pending_tokens: list) -> list:
 def monitor_replies() -> None:
     """
     Run the main monitoring loop.
-    
+
     Continuously checks for replies to pending invitations,
     classifies them, and updates state. Runs until all candidates
     have replied or timeout is reached.
@@ -110,52 +91,58 @@ def monitor_replies() -> None:
             "(nothing with status='sent')."
         )
         return
-    
+
     log.info(
         f"Monitoring {len(pending_tokens)} "
         f"pending candidate(s) for replies..."
     )
-    
+
+    backend = get_email_backend()
+    backend.start()
     start_time = time.time()
     timeout_seconds = MAX_MONITOR_MINUTES * 60
-    
-    while True:
-        still_pending = get_pending_tokens()
 
-        if not still_pending:
-            log.info(
-                "All tracked candidates have replied. Done."
-            )
-            break
+    try:
+        while True:
+            still_pending = get_pending_tokens()
 
-        if time.time() - start_time > timeout_seconds:
-            log.warning(
-                f"Monitor timeout reached "
-                f"({MAX_MONITOR_MINUTES} min). "
-                f"Still pending: {still_pending}"
-            )
-            break
-
-        # Check for replies
-        matched = check_for_replies(still_pending)
-
-        # Classify new replies
-        if matched:
-            for token in matched:
-                reply_body = get_reply_body(token)
-                classification = classify_reply(reply_body)
-                set_classification(
-                    token, classification, datetime.now(timezone.utc)
-                )
-
+            if not still_pending:
                 log.info(
-                    f"Classified token={token} "
-                    f"as '{classification}'"
+                    "All tracked candidates have replied. Done."
                 )
-        else:
-            log.info(
-                f"No new replies. "
-                f"Checking again in {POLL_INTERVAL_SECONDS}s..."
-            )
+                break
 
-        time.sleep(POLL_INTERVAL_SECONDS)
+            if time.time() - start_time > timeout_seconds:
+                log.warning(
+                    f"Monitor timeout reached "
+                    f"({MAX_MONITOR_MINUTES} min). "
+                    f"Still pending: {still_pending}"
+                )
+                break
+
+            # Check for replies
+            matched = check_for_replies(backend, still_pending)
+
+            # Classify new replies
+            if matched:
+                for token in matched:
+                    reply_body = get_reply_body(token)
+                    classification = classify_reply(reply_body)
+                    set_classification(
+                        token, classification, datetime.now(timezone.utc)
+                    )
+
+                    log.info(
+                        f"Classified token={token} "
+                        f"as '{classification}'"
+                    )
+            else:
+                log.info(
+                    f"No new replies. "
+                    f"Checking again in {POLL_INTERVAL_SECONDS}s..."
+                )
+
+            time.sleep(POLL_INTERVAL_SECONDS)
+
+    finally:
+        backend.stop()

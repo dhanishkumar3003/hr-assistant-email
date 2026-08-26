@@ -2,7 +2,7 @@
 Configuration management for email automation.
 
 Loads and validates environment variables required for Gmail
-SMTP/IMAP communication.
+communication and the active email backend.
 """
 
 import os
@@ -15,8 +15,18 @@ log = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# Gmail account identity. Authentication is handled by gmail_auth.py.
+# Which email backend to use - "imap" (SMTP send + IMAP polling, the
+# original mechanism) or "gmail_api" (Gmail API send + Gmail API
+# polling, authenticated via gmail_auth.py). See email_backend.py.
+EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "imap")
+
+# Gmail account identity (both backends).
 GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
+
+# Required only for EMAIL_BACKEND=="imap". The gmail_api backend
+# authenticates via gmail_auth.py's OAuth flow (credentials.json/token.json)
+# instead.
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 
 # Database
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -94,14 +104,14 @@ def require_config():
     Raises:
         SystemExit: If any required environment variable is missing.
     """
-    missing = [
-        key
-        for key, value in {
-            "GMAIL_ADDRESS": GMAIL_ADDRESS,
-            "DATABASE_URL": DATABASE_URL,
-        }.items()
-        if not value
-    ]
+    required = {
+        "GMAIL_ADDRESS": GMAIL_ADDRESS,
+        "DATABASE_URL": DATABASE_URL,
+    }
+    if EMAIL_BACKEND == "imap":
+        required["GMAIL_APP_PASSWORD"] = GMAIL_APP_PASSWORD
+
+    missing = [key for key, value in required.items() if not value]
 
     if missing:
         log.error(
