@@ -8,18 +8,20 @@ The email automation project has been refactored into modular, focused component
 
 ```
 email_automation/
-├── emailautomation.py       # Main entry point (orchestrates CLI)
+├── email_automation.py      # Main entry point (orchestrates CLI)
 ├── config.py                # Configuration & environment setup
-├── state_manager.py         # Candidate state persistence (JSON)
+├── db.py                    # SQLAlchemy engine/session setup
+├── models.py                # SQLAlchemy ORM models (Email, CandidateResponse)
+├── state_manager.py         # Candidate state persistence (PostgreSQL)
 ├── token_manager.py         # Tracking token generation & extraction
 ├── gmail_client.py          # Gmail SMTP/IMAP connections
 ├── email_handler.py         # Email building & parsing
 ├── sender.py                # Invitation sending logic
 ├── reply_classifier.py      # Reply classification (interested/declined/review)
+├── llm_reply_classifier.py  # Ollama LLM fallback for ambiguous replies
 ├── monitor.py               # Reply monitoring loop
 ├── cli.py                   # Command-line interface
-├── candidates_state.json    # Persistent state file (auto-created)
-├── recruiting_mailer.log    # Log file (auto-created)
+├── db/                      # Dockerfile + docker-compose.yml for postgres-db
 └── .env                     # Environment variables (required)
 ```
 
@@ -42,30 +44,18 @@ email_automation/
 ### `state_manager.py`
 **Purpose**: Manages candidate state persistence
 
-- Loads/saves candidate state from JSON file
-- Creates structured candidate records
-- Filters pending candidates
+- Backed by PostgreSQL (`emails` / `candidate_responses` tables) via `db.py` + `models.py`
+- Reply tracking still keys off the token embedded in the email subject
 
 **Key Functions**:
-- `load_state()` - Load from disk
-- `save_state(state)` - Persist to disk
-- `get_pending_tokens(state)` - Get "sent" status candidates
-- `create_candidate_record()` - Build new record structure
+- `save_sent_email(token, candidate_email, candidate_name, subject, body, sent_at)` - Record a sent invitation
+- `get_pending_tokens()` - Tokens with no reply yet
+- `get_candidate_email(token)` - Expected sender for a token
+- `record_reply(token, subject, body, received_at)` - Store an incoming reply
+- `get_reply_body(token)` - Most recent unclassified reply body for a token
+- `set_classification(token, classification, analyzed_at)` - Store the classification result
 
-**State Record Structure**:
-```json
-{
-  "token": {
-    "candidate_email": "person@example.com",
-    "candidate_name": "Jane Doe",
-    "sent_at": "2024-01-15T10:30:00+00:00",
-    "status": "sent|replied|classified",
-    "reply_body": "Yes, I'm interested!",
-    "classification": "interested|declined|needs_review",
-    "replied_at": "2024-01-15T11:45:00+00:00"
-  }
-}
-```
+**Storage**: PostgreSQL, `emails` and `candidate_responses` tables (see `db/Dockerfile` and `db/docker-compose.yml` for the local Postgres container). `DATABASE_URL` in `.env` points at it.
 
 ---
 
@@ -131,15 +121,33 @@ email_automation/
 ### `reply_classifier.py`
 **Purpose**: Classify candidate replies
 
-- Rule-based classifier (can be replaced with ML/LLM)
-- Detects interest, decline, or ambiguity
+- Rule-based keyword matching for the obvious cases
+- Ambiguous replies fall through to `llm_reply_classifier.py` before
+  defaulting to manual review
 
 **Classification Results**:
-- `"interested"` - Keywords: "interested", "yes"
-- `"declined"` - Keywords: "not interested", "decline"
-- `"needs_review"` - Default (ambiguous)
+- `"interested"` - Keywords "interested"/"yes", or LLM label `INTERESTED`
+- `"declined"` - Keywords "not interested"/"decline", or LLM label `NOT_INTERESTED`
+- `"needs_review"` - LLM label `OTHER`, or if the LLM is unreachable
 
-**Future**: Can integrate Ollama or other ML models
+---
+
+### `llm_reply_classifier.py`
+**Purpose**: LLM fallback for replies the rule-based pass can't categorize
+
+- Calls an OSS model through Ollama (via `langchain-ollama`) per the
+  Module 3 PDD's intent-analysis step
+- Returns one of `INTERESTED`, `NOT_INTERESTED`, `OTHER`
+- Raises on failure (unreachable server, missing model) so the caller
+  can decide the fallback - `reply_classifier.py` catches this and
+  defaults to `needs_review`
+
+**Key Function**:
+- `classify_reply_llm(body)` - Classify reply text via Ollama
+
+**Config** (`config.py`, both optional with defaults):
+- `OLLAMA_MODEL` (default `gpt-oss:120b-cloud`)
+- `OLLAMA_BASE_URL` (default `http://localhost:11434`)
 
 ---
 
@@ -172,12 +180,12 @@ email_automation/
 - Result logging
 
 **Commands**:
-- `python emailautomation.py send --to email1@example.com [email2@example.com ...] [--name "Name"]`
-- `python emailautomation.py monitor`
+- `python email_automation.py send --to email1@example.com [email2@example.com ...] [--name "Name"]`
+- `python email_automation.py monitor`
 
 ---
 
-### `emailautomation.py`
+### `email_automation.py`
 **Purpose**: Main entry point
 
 - Sets up logging
@@ -190,17 +198,17 @@ email_automation/
 
 ### Send single invitation
 ```bash
-python emailautomation.py send --to candidate@example.com
+python email_automation.py send --to candidate@example.com
 ```
 
 ### Send to multiple candidates with same name
 ```bash
-python emailautomation.py send --to person1@example.com person2@example.com --name "Jane Doe"
+python email_automation.py send --to person1@example.com person2@example.com --name "Jane Doe"
 ```
 
 ### Monitor inbox for replies
 ```bash
-python emailautomation.py monitor
+python email_automation.py monitor
 ```
 
 ---
@@ -208,23 +216,24 @@ python emailautomation.py monitor
 ## Dependency Graph
 
 ```
-emailautomation.py (entry point)
+email_automation.py (entry point)
     ↓
 cli.py (argument parsing)
     ├→ sender.py (send command)
     │   ├→ config.py
-    │   ├→ state_manager.py
+    │   ├→ state_manager.py → db.py, models.py (PostgreSQL)
     │   ├→ token_manager.py
     │   ├→ email_handler.py
     │   └→ gmail_client.py
     │
     └→ monitor.py (monitor command)
         ├→ config.py
-        ├→ state_manager.py
+        ├→ state_manager.py → db.py, models.py (PostgreSQL)
         ├→ gmail_client.py
         ├→ token_manager.py
         ├→ email_handler.py
         └→ reply_classifier.py
+            └→ llm_reply_classifier.py (ambiguous replies only)
 ```
 
 ---
@@ -244,7 +253,6 @@ cli.py (argument parsing)
 ### Extensibility
 - Replace `reply_classifier.py` with ML model
 - Swap email backend (e.g., SendGrid, Mailgun)
-- Add new storage (e.g., database instead of JSON)
 - Add webhooks, API endpoints, etc.
 
 ### Reusability
@@ -256,19 +264,13 @@ cli.py (argument parsing)
 
 ## Extension Examples
 
-### 1. Add Database Storage
-Replace `state_manager.py` with database operations while keeping the same interface.
-
-### 2. Integrate ML Classifier
-Replace simple rules in `reply_classifier.py` with Ollama or Claude API calls.
-
-### 3. Add Email Template System
+### 1. Add Email Template System
 Extend `email_handler.py` with template engine for dynamic content.
 
-### 4. Build REST API
+### 2. Build REST API
 Use `sender.py` and `monitor.py` as backend for Flask/FastAPI endpoints.
 
-### 5. Add Email Scheduling
+### 3. Add Email Scheduling
 Modify `sender.py` to accept scheduled send times, persist with state.
 
 ---
@@ -306,9 +308,10 @@ Required environment variables:
 ```
 GMAIL_ADDRESS=your-email@gmail.com
 GMAIL_APP_PASSWORD=your-app-specific-password
+DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/hr_automation
 ```
 
-**Note**: Use Gmail App Passwords, not your main password.
+**Note**: Use Gmail App Passwords, not your main password. `DATABASE_URL` must point at a running Postgres instance - see `db/docker-compose.yml`.
 
 ---
 
@@ -329,7 +332,7 @@ Log levels:
 ## Future Improvements
 
 1. **Database**: Replace JSON with PostgreSQL/SQLite
-2. **ML Classifier**: Integrate Claude/Ollama for smarter classification
+2. **ML Classifier**: Ollama fallback is in (`llm_reply_classifier.py`) - consider using it as the primary classifier instead of a fallback
 3. **Email Templates**: Support custom HTML templates
 4. **Scheduling**: Queue emails for later sending
 5. **Webhooks**: Notify external systems on reply

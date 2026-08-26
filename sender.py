@@ -7,7 +7,7 @@ Sends invitation emails and tracks them in state.
 import logging
 from datetime import datetime, timezone
 from config import require_config
-from state_manager import load_state, save_state, create_candidate_record
+from state_manager import save_sent_email
 from token_manager import generate_token
 from email_handler import build_invite_message
 from gmail_client import send_message
@@ -47,18 +47,17 @@ def send_invite(to_addr: str, candidate_name: str = "") -> str:
         f"token={token} | "
         f"subject='{subject}'"
     )
-    
-    # Save to state
-    state = load_state()
-    sent_at = datetime.now(timezone.utc).isoformat()
-    
-    state[token] = create_candidate_record(
+
+    # Save to database
+    sent_at = datetime.now(timezone.utc)
+
+    save_sent_email(
+        token,
         to_addr,
         candidate_name,
+        subject,
+        message.get_content(),
         sent_at,
-        token
     )
-    
-    save_state(state)
-    
+
     return token

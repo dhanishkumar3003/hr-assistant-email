@@ -12,16 +12,16 @@ This module orchestrates the CLI by importing modular components.
 Usage:
 
     Single candidate:
-        python emailautomation.py send --to candidate@example.com
+        python email_automation.py send --to candidate@example.com
 
     Multiple candidates:
-        python emailautomation.py send --to candidate1@example.com candidate2@example.com
+        python email_automation.py send --to candidate1@example.com candidate2@example.com
 
     With candidate name:
-        python emailautomation.py send --to candidate1@example.com --name "Jane Doe"
+        python email_automation.py send --to candidate1@example.com --name "Jane Doe"
 
     Monitor replies:
-        python emailautomation.py monitor
+        python email_automation.py monitor
 """
 
 import sys
